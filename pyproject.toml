@@ -1,0 +1,21 @@
+[project]
+name = "jaxprobe"
+version = "0.0.1"
+description = "Interpretability tools for JAX models: capture, patch, sparse autoencoders, steering, circuits"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = ["jax>=0.10"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 120
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
