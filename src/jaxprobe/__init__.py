@@ -1,2 +1,5 @@
-"""jaxprobe: interpretability tools for JAX models (pre-alpha; see README for the planned API)."""
-__version__ = "0.0.1"
+"""jaxprobe: interpretability tools for JAX models (pre-alpha). See README.md."""
+from jaxprobe.core import TapError, at, checkpoint, index, run, scan, scope, tap
+
+__version__ = "0.1.0"
+__all__ = ["TapError", "at", "checkpoint", "index", "run", "scan", "scope", "tap"]

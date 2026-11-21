@@ -1,6 +1,6 @@
 [project]
 name = "jaxprobe"
-version = "0.0.1"
+version = "0.1.0"
 description = "Interpretability tools for JAX models: capture, patch, sparse autoencoders, steering, circuits"
 readme = "README.md"
 license = "MIT"
