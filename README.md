@@ -4,7 +4,7 @@ Interpretability tools for JAX models: capture and patch activations, train spar
 browse features, and trace circuits. PyTorch has TransformerLens, nnsight, SAELens and circuit-tracer;
 JAX has had no maintained equivalent since Penzai was archived. jaxprobe aims to fill that gap.
 
-**Status: pre-alpha.** `core`, `sae` and `steer` work and are tested; `dash` and `trace` are planned. The API
+**Status: pre-alpha.** `core`, `sae`, `steer` and `trace` work and are tested; `dash` is planned. The API
 may still change.
 
 ## Quick start
@@ -60,8 +60,12 @@ Both mistakes raise `TapError` rather than returning wrong or leaked values.
   an ablation into the weights; `sweep` over layer × coefficient; KL for damage.
 - **dash** (planned): feature dashboards with top contexts, logit effects and density. Auto-interpretation
   through any OpenAI-compatible local server, with static HTML and Neuronpedia-compatible JSON.
-- **trace** (planned): transcoders, a replacement model with error nodes, and attribution graphs exported in
-  the circuit-tracer / Neuronpedia graph format.
+- **trace**: attribution graphs (Ameisen et al. 2025) with per-layer transcoders. `attribute` replaces each MLP
+  by its transcoder plus an error term, freezes the tapped nonlinearities (attention patterns, norm scales), and
+  gets every edge of the resulting linear model from one batched `jax.vjp`. `prune` keeps the nodes and edges
+  that carry most of the influence and reports replacement and completeness scores. `ablate_features` tests
+  a graph on the real model. `to_json` and `write_graph` export circuit-tracer's graph format, which its viewer
+  and Neuronpedia's read.
 - **planned for sae**: streaming activation buffers, and export to the SAELens / Gemma Scope layout.
 
 ## Checked on a real model
@@ -76,6 +80,14 @@ On SmolLM2-135M (float32, AMD RX 7600 XT, JAX 0.12.1 on ROCm), with taps added t
   `ablate` to within 4.3e-4 in the logits, while the edit itself moves logits by up to 20.5.
 - Patching one prompt's activations into a run on another reproduces the first prompt's logits (6e-5).
 - `run` adds no measurable time over the hand-written forward pass (104 ms vs 105 ms for 8 × 128 tokens).
+- `trace`, with 30 per-layer transcoders (8,192 features each) trained in
+  [learn-jax module 48](https://github.com/joebarbere/learn-jax/tree/main/modules/48-tracing-circuits):
+  - The frozen replacement model reproduces the real logits to about 1e-5.
+  - Every node's incoming edges plus its constant part add up to its value, to 1e-4.
+  - A graph of 9,000 nodes takes about 20 s.
+  - Removing a graph's 30 most influential features drops P(" Texas") after "Dallas is a city in the state of"
+    from 0.94 to 0.23. Removing 30 random active features leaves it at 0.94.
+  - The exported JSON opens in circuit-tracer's viewer.
 
 It grew out of the interpretability modules of [learn-jax](https://github.com/joebarbere/learn-jax).
 

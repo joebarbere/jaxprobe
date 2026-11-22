@@ -2,4 +2,4 @@ import jaxprobe
 
 
 def test_version():
-    assert jaxprobe.__version__ == "0.1.0"
+    assert jaxprobe.__version__ == "0.2.0"
