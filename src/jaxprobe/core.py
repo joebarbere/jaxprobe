@@ -16,6 +16,16 @@ How it works. `tap` is a Python side effect at trace time: `run` sets a recordin
 and returns what was recorded as ordinary outputs of the same trace. So `run` composes with `jit`, `grad`,
 `vmap` and friends when it is called *inside* them (`jax.jit(lambda p, t: jaxprobe.run(model, p, t, ...))`).
 
+To jit a whole sweep, pass the patch as an argument: `jaxprobe.bind(model)` returns `g(patch, *args)`, and the
+patches jaxprobe builds (`at`, `steer.add`, `steer.ablate`) are pytrees, so their vectors and coefficients are
+traced. One compile covers every coefficient, and `jax.vmap` over a coefficient or a layer works:
+
+    g = jax.jit(jaxprobe.bind(model, capture={"layers.resid": jaxprobe.reduce.last}))
+    out, acts = g({"layers.resid": jaxprobe.at(12, steer.add(u, 4.0))}, params, tokens)
+
+`capture` may map patterns to reducers, which run where the tap is (inside the scan body), so only the reduced
+value is stacked and returned: e.g. the last position, or a sum over the batch.
+
 Two rules follow from that:
 
 1. Don't call an already-jitted function inside `run`: a cached trace doesn't run its taps again. `run` raises
@@ -31,13 +41,13 @@ import dataclasses
 import fnmatch
 import functools
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 
-__all__ = ["TapError", "at", "checkpoint", "index", "run", "scan", "scope", "tap"]
+__all__ = ["At", "TapError", "at", "bind", "checkpoint", "index", "run", "scan", "scope", "tap"]
 
 try:  # private, but the only way to tell which trace a tap runs in; without it the check is skipped
     from jax._src.core import get_opaque_trace_state as _trace_state
@@ -55,7 +65,7 @@ class _Frame:
     """One recording context: the outermost one comes from `run`, inner ones from `scan` / `checkpoint`."""
 
     prefix: str  # full name prefix for taps in this frame, e.g. "layers." inside scan(name="layers")
-    capture: Callable[[str], bool]
+    capture: Callable[[str], Callable | None]  # full name -> reducer to record with, or None
     patches: list[tuple[str, Any]]  # (pattern, patch) on full names
     idx: tuple  # enclosing scan indices, outermost first (traced int32s)
     trace: Any = None  # the JAX trace this frame was opened in; taps must run in the same one
@@ -86,13 +96,28 @@ def _push(frame: _Frame):
         _stack().pop()
 
 
-def _matcher(capture) -> Callable[[str], bool]:
+def _identity(x):
+    return x
+
+
+def _matcher(capture) -> Callable[[str], Callable | None]:
+    """capture -> fn(full name) giving the reducer to record with (identity by default), or None if not captured.
+    capture: True, a pattern, a list of patterns, or {pattern: reducer or None}; the first matching pattern wins."""
     if capture is True:
-        return lambda name: True
+        return lambda name: _identity
     if not capture:
-        return lambda name: False
-    pats = [capture] if isinstance(capture, str) else list(capture)
-    return lambda name: any(fnmatch.fnmatchcase(name, p) for p in pats)
+        return lambda name: None
+    if isinstance(capture, Mapping):
+        items = [(p, r or _identity) for p, r in capture.items()]
+    else:
+        items = [(p, _identity) for p in ([capture] if isinstance(capture, str) else capture)]
+
+    def match(name):
+        for p, r in items:
+            if fnmatch.fnmatchcase(name, p):
+                return r
+        return None
+    return match
 
 
 def _patterns(capture) -> list[str]:
@@ -106,7 +131,7 @@ def tap(name: str, x):
     """Mark `x` as the activation `name`. Returns x, or its patched value inside `run`.
 
     x may be an array or a pytree of arrays. Captures record the value *after* any patch, i.e. what the rest of
-    the model sees."""
+    the model sees, passed through the capture's reducer if it has one."""
     f = _top()
     if f is None:
         return x
@@ -119,11 +144,12 @@ def tap(name: str, x):
     for pat, p in f.patches:
         if fnmatch.fnmatchcase(full, pat):
             x = _apply(p, x, full, f.idx)
-    if f.capture(full):
+    red = f.capture(full)
+    if red is not None:
         if full in f.captures:
             raise TapError(f"tap {full!r} was reached twice in one trace; give each call site its own name "
                            "(or wrap repeated layers in jaxprobe.scan / jaxprobe.scope)")
-        f.captures[full] = x
+        f.captures[full] = red(x)
     return x
 
 
@@ -134,19 +160,47 @@ def index():
     return f.idx[-1] if f is not None and f.idx else None
 
 
-def at(layer: int | Iterable[int], fn: Callable):
-    """A patch that applies fn only at the given scan index (or indices) and leaves the other layers alone."""
-    layers = (layer,) if isinstance(layer, int) else tuple(layer)
+def _is_pytree(fn) -> bool:
+    """True for patches that flatten into arrays (jaxprobe's own); False for plain functions (a single leaf)."""
+    leaves = jax.tree.leaves(fn)
+    return not (len(leaves) == 1 and leaves[0] is fn)
 
-    def patch(x):
+
+@jax.tree_util.register_pytree_node_class
+class At:
+    """Patch: apply fn only at the given layer indices. A pytree: the layers (and fn, if it is a pytree patch) are
+    traced, so `jax.vmap` over the layer works. Build it with `jaxprobe.at`."""
+
+    def __init__(self, layers, fn):
+        self.layers, self.fn = layers, fn
+
+    def __call__(self, x):
         i = index()
         if i is None:
-            raise TapError("jaxprobe.at(...) patches only work on taps inside jaxprobe.scan")
-        y = fn(x)
-        hit = jnp.isin(i, jnp.asarray(layers))
+            raise TapError("jaxprobe.at(...) patches only work on taps inside jaxprobe.scan (or stream_layers)")
+        y = self.fn(x)
+        hit = jnp.isin(i, self.layers)
         return jax.tree.map(lambda a, b: jnp.where(hit, b.astype(a.dtype), a), x, y)
 
-    return patch
+    def tree_flatten(self):
+        if _is_pytree(self.fn):
+            return (self.layers, self.fn), None
+        return (self.layers,), self.fn
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        return cls(*children) if aux is None else cls(children[0], aux)
+
+    def __repr__(self):
+        return f"At(layers={self.layers!r}, fn={self.fn!r})"
+
+
+def at(layer, fn: Callable) -> At:
+    """A patch that applies fn only at the given scan index (or indices) and leaves the other layers alone.
+    layer may be an int, a sequence of ints, or a traced integer array (to vmap over layers)."""
+    if isinstance(layer, int):
+        layer = (layer,)
+    return At(jnp.atleast_1d(jnp.asarray(layer, jnp.int32)), fn)
 
 
 def _apply(p, x, name, idx):
@@ -176,6 +230,30 @@ def run(fn: Callable, *args, capture=(), patch: Mapping[str, Any] | None = None,
     strict:  raise TapError if a capture or patch pattern matches no tap (usually a typo, or fn was jitted)."""
     patches = list((patch or {}).items())
     frame = _Frame(prefix="", capture=_matcher(capture), patches=patches, idx=(), trace=_trace_state())
+    with _push(frame):
+        out = fn(*args, **kwargs)
+    if strict:
+        _check(frame.seen, _patterns(capture), [p for p, _ in patches])
+    return out, frame.captures
+
+
+def bind(fn: Callable, *, capture=(), strict: bool = True):
+    """fn -> g(patch, *args, **kwargs) = run(fn, *args, capture=capture, patch=patch). Jit g once and pass
+    different patches (same structure) without recompiling; vmap over a patch's coefficient or layer."""
+    @functools.wraps(fn)
+    def g(patch, *args, **kwargs):
+        return run(fn, *args, capture=capture, patch=patch, strict=strict, **kwargs)
+    return g
+
+
+def run_layer(fn: Callable, i, *args, capture=(), patch: Mapping[str, Any] | None = None, name: str = "layers",
+              strict: bool = True, **kwargs):
+    """Run one layer fn(*args) as step i of a scan named `name`, outside any scan: taps get the "<name>." prefix,
+    `index()` is i and `at` patches work. For running layers one at a time (`jaxprobe.io.stream_layers`).
+    Returns (out, captures) with one layer's captures (not stacked)."""
+    patches = list((patch or {}).items())
+    frame = _Frame(prefix=name + ".", capture=_matcher(capture), patches=patches,
+                   idx=(jnp.asarray(i, jnp.int32),), trace=_trace_state())
     with _push(frame):
         out = fn(*args, **kwargs)
     if strict:

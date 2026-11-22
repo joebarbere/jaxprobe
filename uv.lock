@@ -77,10 +77,12 @@ wheels = [
 
 [[package]]
 name = "jaxprobe"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "jax" },
+    { name = "ml-dtypes" },
+    { name = "numpy" },
 ]
 
 [package.dev-dependencies]
@@ -90,7 +92,11 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "jax", specifier = ">=0.10" }]
+requires-dist = [
+    { name = "jax", specifier = ">=0.10" },
+    { name = "ml-dtypes", specifier = ">=0.4" },
+    { name = "numpy", specifier = ">=1.26" },
+]
 
 [package.metadata.requires-dev]
 dev = [

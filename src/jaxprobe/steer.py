@@ -6,9 +6,14 @@
 
 Ablating a direction at runtime after every write to the residual stream equals editing the weights that write
 there: W ← W − α (W u) uᵀ for each matrix whose output lands in the stream (`orthogonalize`). Arditi et al. 2024
-(arXiv 2406.11717) used this to remove a refusal direction; it's shown here on benign directions.
+(arXiv 2406.11717) used this to remove a refusal direction; `jaxprobe.directions` packages that recipe.
+
+`add` and `ablate` return pytrees, so under `jaxprobe.bind` their vectors and coefficients are traced: one compile
+for a whole sweep, and `jax.vmap` over the coefficient works.
 """
 from __future__ import annotations
+
+import dataclasses
 
 import jax
 import jax.numpy as jnp
@@ -30,35 +35,53 @@ def actadd(pos_act, neg_act):
     return jnp.asarray(pos_act, jnp.float32) - jnp.asarray(neg_act, jnp.float32)
 
 
-def add(v, coeff: float = 1.0, positions=None):
-    """Patch: x + coeff·v, at every position or at a boolean mask / index array over the sequence axis (-2)."""
-    v = jnp.asarray(v)
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass
+class Add:
+    """Patch: x + coeff·v, at every position or at the given positions of the sequence axis (-2)."""
+    v: jax.Array
+    coeff: jax.Array
+    positions: jax.Array | None = None
 
-    def patch(x):
-        y = x + (coeff * v).astype(x.dtype)
-        if positions is None:
+    def __call__(self, x):
+        y = x + (self.coeff * self.v).astype(x.dtype)
+        if self.positions is None:
             return y
-        m = jnp.zeros(x.shape[-2], bool).at[positions].set(True)
+        m = jnp.zeros(x.shape[-2], bool).at[self.positions].set(True)
         return jnp.where(m[:, None], y, x)
-    return patch
 
 
-def ablate(u, alpha: float = 1.0):
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass
+class Ablate:
     """Patch: x − α (x·û) û. α = 1 removes the component along u; α = 2 reflects it."""
-    u = unit(u)
+    u: jax.Array
+    alpha: jax.Array
 
-    def patch(x):
+    def __call__(self, x):
+        u = unit(self.u)
         xf = x.astype(jnp.float32)
-        return (xf - alpha * (xf @ u)[..., None] * u).astype(x.dtype)
-    return patch
+        return (xf - self.alpha * (xf @ u)[..., None] * u).astype(x.dtype)
 
 
-def orthogonalize(W, u, alpha: float = 1.0):
-    """W − α (W û) ûᵀ for a matrix W (..., d) whose rows write to the residual stream: afterwards nothing W writes
-    has a component along u (α = 1). Batched over leading axes (e.g. stacked layers)."""
+def add(v, coeff=1.0, positions=None) -> Add:
+    """Patch: x + coeff·v, at every position or at a boolean mask / index array over the sequence axis (-2)."""
+    return Add(jnp.asarray(v), jnp.asarray(coeff, jnp.float32), None if positions is None else jnp.asarray(positions))
+
+
+def ablate(u, alpha=1.0) -> Ablate:
+    """Patch: x − α (x·û) û. α = 1 removes the component along u; α = 2 reflects it."""
+    return Ablate(jnp.asarray(u, jnp.float32), jnp.asarray(alpha, jnp.float32))
+
+
+def orthogonalize(W, u, alpha: float = 1.0, axis: int = -1):
+    """W − α (W û) ûᵀ along `axis`, the axis of W that lands in the residual stream (the last one for JAX-style
+    (in, d) matrices, embeddings and biases; 0 for PyTorch-style (d, in) weights). Afterwards nothing W writes has
+    a component along u (α = 1). Batched over the other axes (e.g. stacked layers)."""
     u = unit(u)
-    Wf = W.astype(jnp.float32)
-    return (Wf - alpha * (Wf @ u)[..., None] * u).astype(W.dtype)
+    Wf = jnp.moveaxis(jnp.asarray(W).astype(jnp.float32), axis, -1)
+    out = Wf - alpha * (Wf @ u)[..., None] * u
+    return jnp.moveaxis(out, -1, axis).astype(W.dtype)
 
 
 def sweep(score, layers, coeffs):
