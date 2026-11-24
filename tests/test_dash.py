@@ -37,6 +37,10 @@ def test_counts_hist_and_moments():
     np.testing.assert_allclose(s["max"], zm.max((0, 1)), rtol=1e-6)
     np.testing.assert_allclose(s["mean"], zm.sum((0, 1)) / np.maximum(fired, 1), rtol=1e-5)
     np.testing.assert_array_equal(s["hist"].sum(1), fired)                       # every firing lands in one bin
+    c, m = (zm > 0).sum(1), mask.sum(1)                                           # per sequence
+    np.testing.assert_allclose(s["fired_sq"], (c ** 2).sum(0))
+    np.testing.assert_allclose(s["fired_m"], (c * m[:, None]).sum(0))
+    assert s["tok_sq"] == (m ** 2).sum()
     for f in range(7):                                                            # and in the right one
         v = np.log10(zm[..., f][zm[..., f] > 0])
         e = s["log10_edges"]

@@ -49,6 +49,8 @@ LOG10_EDGES = np.arange(-4.0, 3.0 + 1e-9, 0.125, dtype=np.float32)
 def _empty(n: int, top: int, width: int, nbins: int, cooc: bool):
     out = {"n_tokens": jnp.zeros((), jnp.float32), "n_seqs": jnp.zeros((), jnp.int32),
             "fired": jnp.zeros(n, jnp.float32), "sum": jnp.zeros(n, jnp.float32), "max": jnp.zeros(n, jnp.float32),
+            "fired_sq": jnp.zeros(n, jnp.float32), "fired_m": jnp.zeros(n, jnp.float32),
+            "tok_sq": jnp.zeros((), jnp.float32),
             "hist": jnp.zeros((n, nbins), jnp.float32),
             "top_value": jnp.zeros((n, top), jnp.float32), "top_seq": jnp.full((n, top), -1, jnp.int32),
             "top_pos": jnp.zeros((n, top), jnp.int32), "top_tokens": jnp.full((n, top, width), -1, jnp.int32),
@@ -68,6 +70,10 @@ def _update(s, z, tokens, mask, edges, *, before: int, after: int):
     out["n_tokens"] = s["n_tokens"] + mask.sum()
     out["n_seqs"] = s["n_seqs"] + B
     out["fired"] = s["fired"] + pos.sum((0, 1))
+    c, m = pos.sum(1).astype(jnp.float32), mask.sum(1).astype(jnp.float32)          # per sequence: (B, n), (B,)
+    out["fired_sq"] = s["fired_sq"] + (c * c).sum(0)                               # for burst-aware drift tests
+    out["fired_m"] = s["fired_m"] + (c * m[:, None]).sum(0)
+    out["tok_sq"] = s["tok_sq"] + (m * m).sum()
     out["sum"] = s["sum"] + z.sum((0, 1))
     out["max"] = jnp.maximum(s["max"], z.max((0, 1)))
     # histogram of log10(activation) over the tokens where the feature fired: count >= each edge, then difference
@@ -131,14 +137,16 @@ class Collector:
         """NumPy arrays: n_tokens, n_seqs, fired, density, mean (over firing tokens), max, hist (n, bins),
         log10_edges, top_value / top_seq / top_pos (n, top), top_tokens / top_acts (n, top, window) with -1 / 0
         padding, `before` (the peak's index in each window, where the window isn't cut by a sequence edge), and
-        `cooc` (n, n) if it was collected."""
+        `cooc` (n, n) if it was collected; fired_sq, fired_m and tok_sq are per-sequence sums (Σc², Σc·m, Σm²
+        over sequences, c = a feature's firings and m = real tokens in the sequence) for `monitor.drift`."""
         s = jax.tree.map(np.asarray, self.state)
         n_tok = float(s["n_tokens"])
         return {"n_tokens": n_tok, "n_seqs": int(s["n_seqs"]), "fired": s["fired"],
                 "density": s["fired"] / max(n_tok, 1.0), "mean": s["sum"] / np.maximum(s["fired"], 1), "max": s["max"],
                 "hist": s["hist"], "log10_edges": np.asarray(self.edges), "top_value": s["top_value"],
                 "top_seq": s["top_seq"], "top_pos": s["top_pos"], "top_tokens": s["top_tokens"],
-                "top_acts": s["top_acts"], "before": self.before, "after": self.after} | (
+                "top_acts": s["top_acts"], "before": self.before, "after": self.after,
+                "fired_sq": s["fired_sq"], "fired_m": s["fired_m"], "tok_sq": float(s["tok_sq"])} | (
                     {"cooc": s["cooc"]} if "cooc" in s else {})
 
 

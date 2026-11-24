@@ -4,8 +4,8 @@ Interpretability tools for JAX models: capture and patch activations, train spar
 browse features, and trace circuits. PyTorch has TransformerLens, nnsight, SAELens and circuit-tracer;
 JAX has had no maintained equivalent since Penzai was archived. jaxprobe aims to fill that gap.
 
-**Status: pre-alpha.** `core`, `sae`, `steer`, `dash`, `lens`, `trace`, `directions`, `io`, `probe`, `reduce` and
-`batch` work and are tested. The API may still change.
+**Status: pre-alpha.** `core`, `sae`, `steer`, `dash`, `lens`, `monitor`, `trace`, `directions`, `io`, `probe`,
+`reduce` and `batch` work and are tested. The API may still change.
 
 ## Quick start
 
@@ -79,6 +79,14 @@ Both mistakes raise `TapError` rather than returning wrong or leaked values.
   `logit_effects`, `neighbours` (decoder cosine), `coactivation` (φ of firing) and `feature_map` (PCA, or UMAP
   with the `umap` extra). `to_html` writes one self-contained page: a clickable map of the features and a card
   per feature. `to_neuronpedia` writes SAEDashboard's Neuronpedia JSON layout. Auto-interpretation is planned.
+- **monitor**: watch a model's internals while it trains or serves. `health` (per-token RMS and its maximum,
+  largest |x|, outlier dimensions, NaN/Inf), `attention` (entropy per head, peak weight, attention-sink share),
+  `units` (dead and active fractions) and `project` (scores along a direction or probe) are capture reducers, so
+  they run inside the compiled step and return a few numbers per layer; `logit_stats` covers the output (max
+  logit, z and z², entropy). Nothing calls back to the host: fetch every N steps. `Running` keeps a running mean
+  and variance of any metrics pytree and flags values far outside their own history. `drift` compares two
+  `dash.Collector` results feature by feature, with a variance that counts passages rather than tokens (SAE
+  features fire in bursts). `JsonlWriter`, `read_jsonl`, and `scalars` to flatten metrics for TensorBoard or W&B.
 - **trace**: attribution graphs (Ameisen et al. 2025) with per-layer transcoders. `attribute` replaces each MLP
   by its transcoder plus an error term, freezes the tapped nonlinearities (attention patterns, norm scales), and
   gets every edge of the resulting linear model from one batched `jax.vjp`. `prune` keeps the nodes and edges
@@ -122,6 +130,21 @@ On SmolLM2-135M (float32, AMD RX 7600 XT, JAX 0.12.1 on ROCm), with taps added t
   - Removing a graph's 30 most influential features drops P(" Texas") after "Dallas is a city in the state of"
     from 0.94 to 0.23. Removing 30 random active features leaves it at 0.94.
   - The exported JSON opens in circuit-tracer's viewer.
+
+0.6.0, `monitor` on SmolLM2-135M (bf16) and module 47's TopK SAE:
+
+- `health` and `attention` match a brute-force computation from the captured activations (1e-7 and 2e-5).
+  They show the model's known attention sink: by block 16 the largest token RMS is about 858 against a
+  typical 13–28, and later layers put 0.48–0.79 of their attention on the first token.
+- Monitoring every layer's residual stream and attention adds 16% to a forward pass (25.2 vs 21.8 ms for
+  8 × 128 tokens): 485 numbers per batch, one 4.9 kB JSON line.
+- `Running` over 40 clean batches, then 40 more: 1 value beyond z = 8 out of 19,400 (15 beyond z = 6). A random
+  push at block 12 of half the typical token norm raised 76 flags, all in blocks 12 and above; random tokens
+  raised 253. Batches from another domain raised 25–30: health statistics are for numerical trouble, not content.
+- `drift` between random halves of the detective windows: no feature flagged (largest |z| 3.7 of 8,192). The
+  first test, a token-level binomial, flagged about 2,300 there. Between the two halves of the text in order:
+  549 more and 728 less active (top z 23), since they are different parts of the stories. Against Shakespeare:
+  567 more, 1,437 less, 36 gone (top z 63), and twice the median histogram divergence (0.095 vs 0.042 bits).
 
 0.5.0, `lens` on SmolLM2-135M, against [learn-jax module 47](https://github.com/joebarbere/learn-jax/tree/main/modules/47-reading-activations)'s
 own lens code (bf16):
