@@ -74,6 +74,17 @@ def ablate(u, alpha=1.0) -> Ablate:
     return Ablate(jnp.asarray(u, jnp.float32), jnp.asarray(alpha, jnp.float32))
 
 
+def random_like(v, key, orthogonal: bool = False):
+    """A random direction with v's norm (per vector along the last axis): the control for "does *any* push of this
+    size do it?". orthogonal=True also removes its component along v."""
+    v = jnp.asarray(v, jnp.float32)
+    r = jax.random.normal(key, v.shape, jnp.float32)
+    if orthogonal:
+        u = v / jnp.linalg.norm(v, axis=-1, keepdims=True)
+        r = r - (r * u).sum(-1, keepdims=True) * u
+    return r * (jnp.linalg.norm(v, axis=-1, keepdims=True) / jnp.linalg.norm(r, axis=-1, keepdims=True))
+
+
 def orthogonalize(W, u, alpha: float = 1.0, axis: int = -1):
     """W − α (W û) ûᵀ along `axis`, the axis of W that lands in the residual stream (the last one for JAX-style
     (in, d) matrices, embeddings and biases; 0 for PyTorch-style (d, in) weights). Afterwards nothing W writes has

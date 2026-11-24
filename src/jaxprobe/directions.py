@@ -111,6 +111,33 @@ def candidates(pos: Stats, neg: Stats):
     return pos.mean - neg.mean
 
 
+def pca(pos, neg=None, *, center: bool | None = None, k: int = 1, return_explained: bool = False):
+    """Principal direction(s) of contrasting activations, the "PCA of differences" of representation engineering
+    (Zou et al. 2023, arXiv 2310.01405; the repeng library). pos and neg are paired (N, …, d) activations, e.g.
+    "Talk about cats." vs "Talk about anything." with the same assistant prefix; the PCA runs on pos − neg (or on
+    pos alone if neg is None), separately for every middle index (layer, position). The sign is chosen so pos
+    projects above neg on average. center defaults to False for differences (repeng flips the order of random
+    pairs before a centered PCA, which comes to the same thing: the axis the differences share) and True for pos
+    alone. Returns unit vectors (…, d), or (…, k, d) for k > 1, and with
+    return_explained the share of variance each explains (…,) / (…, k)."""
+    X = jnp.asarray(pos, jnp.float32)
+    if neg is not None:
+        X = X - jnp.asarray(neg, jnp.float32)
+    X = jnp.moveaxis(X, 0, -2)                                                     # (…, N, d)
+    if center is None:
+        center = neg is None
+    Xc = X - X.mean(-2, keepdims=True) if center else X
+    _, s, vt = jnp.linalg.svd(Xc, full_matrices=False)
+    V = vt[..., :k, :]                                                             # (…, k, d)
+    sign = jnp.sign((X.mean(-2)[..., None, :] * V).sum(-1, keepdims=True))         # mean difference points to +
+    V = V * jnp.where(sign == 0, 1.0, sign)
+    var = s * s
+    ex = var[..., :k] / jnp.maximum(var.sum(-1, keepdims=True), 1e-30)
+    if k == 1:
+        V, ex = V[..., 0, :], ex[..., 0]
+    return (V, ex) if return_explained else V
+
+
 def refusal_score(logits, token_ids, eps: float = 1e-8):
     """Arditi et al.'s refusal metric from next-token logits (..., V): log-odds that the next token is one of
     token_ids (the first tokens of typical refusals, e.g. "I", "As", "Sorry"). > 0 means a refusal is more likely

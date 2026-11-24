@@ -4,8 +4,8 @@ Interpretability tools for JAX models: capture and patch activations, train spar
 browse features, and trace circuits. PyTorch has TransformerLens, nnsight, SAELens and circuit-tracer;
 JAX has had no maintained equivalent since Penzai was archived. jaxprobe aims to fill that gap.
 
-**Status: pre-alpha.** `core`, `sae`, `steer`, `dash`, `trace`, `directions`, `io`, `probe`, `reduce` and `batch`
-work and are tested. The API may still change.
+**Status: pre-alpha.** `core`, `sae`, `steer`, `dash`, `lens`, `trace`, `directions`, `io`, `probe`, `reduce` and
+`batch` work and are tested. The API may still change.
 
 ## Quick start
 
@@ -63,7 +63,16 @@ Both mistakes raise `TapError` rather than returning wrong or leaked values.
   It provides losses, decoder renormalisation and a `splice` patch for loss-recovered evaluation. Metrics: FVU,
   loss recovered, density.
 - **steer**: mean-difference (CAA) and ActAdd vectors; `add` and `ablate` patches; `orthogonalize`, which bakes
-  an ablation into the weights; `sweep` over layer × coefficient; KL for damage.
+  an ablation into the weights; `sweep` over layer × coefficient; KL for damage; `random_like`, a random vector
+  with the same norm, as the control for "would any push this size do it?".
+- **lens**: the logit lens and the tuned lens (Belrose et al. 2023) over any stack of residual-stream states.
+  `stats` reads every layer one at a time (no layers × tokens × vocab array): KL to the final prediction,
+  agreement, entropy, top tokens, the rank and log-probability of a target token, and the log-probability of
+  token sets such as {" yes", " Yes", …}. `fit_tuned` trains the per-layer translators with the forward pass in
+  the same compiled step. `dla` (direct logit attribution) splits a logit, or a logit difference, into what each
+  component wrote to the residual stream, with the final norm's scale frozen, so the parts add up to it exactly.
+  `rms_unembed` / `layer_unembed` build the readout for RMSNorm and LayerNorm models; any `h -> logits` callable
+  works for the lens. `to_html` writes a layer × position grid of top tokens.
 - **dash**: feature dashboards for SAEs and transcoders. `Collector` streams codes over a dataset in one
   compiled call per batch: firing density, a log-activation histogram, top contexts (one per sequence, with
   the activations around the peak) and, optionally, how often every pair of features fires together.
@@ -84,6 +93,8 @@ Both mistakes raise `TapError` rather than returning wrong or leaked values.
   statistics over many prompts (optionally spilling every row to disk, resumably); `candidates`;
   `refusal_score` (first-token log-odds, no generation); `arditi_score`, `grid` and `select` for choosing a layer
   and position; `abliterate` (globs over parameter paths) and `check_edit`; `hf_edit` for Hugging Face names.
+  `pca`: the principal axis of paired differences, the representation-engineering recipe (Zou et al. 2023; the
+  repeng library), per layer and position.
 - **probe**: logistic-regression probes on activations (`fit_logistic`, `score`, `direction`, `auc`).
 - **io**: safetensors without extra dependencies: `save`/`load` pytrees (sharded, memory-mapped, partial loads,
   atomic writes); `edit_checkpoint`, which edits a Hugging Face checkpoint one tensor at a time; `stream_layers`,
@@ -111,6 +122,39 @@ On SmolLM2-135M (float32, AMD RX 7600 XT, JAX 0.12.1 on ROCm), with taps added t
   - Removing a graph's 30 most influential features drops P(" Texas") after "Dallas is a city in the state of"
     from 0.94 to 0.23. Removing 30 random active features leaves it at 0.94.
   - The exported JSON opens in circuit-tracer's viewer.
+
+0.5.0, `lens` on SmolLM2-135M, against [learn-jax module 47](https://github.com/joebarbere/learn-jax/tree/main/modules/47-reading-activations)'s
+own lens code (bf16):
+
+- Logit-lens and tuned-lens KL and top-1 agreement for all 31 layers on module 47's validation windows match
+  its saved results to within 5% (the largest gap is on a top-1 share near 0.1; KL agrees to the second decimal).
+- `fit_tuned` with module 47's recipe (Adam, warmup 50, cosine to 1e-4, 1,000 steps of 16 × 128 tokens)
+  retraces its loss curve (mean KL 17.23 → 2.81 → 2.05 → 1.63 at steps 0/100/200/300, 1.52 at the end) at the
+  same speed, 0.99 s per step.
+- "The capital of France is the city of": the logit lens first ranks " Paris" top at layer 27 of 30, the tuned
+  lens at layer 24. `dla` puts the largest direct push on the attention of block 24 (+4.4) and the MLPs of
+  blocks 26–29 (+1.4 to +2.0). In bf16 the parts sum to 9.68 against the model's 9.63, because the model's own
+  residual additions round; in the float32 tests they agree to 1e-4.
+
+`examples/introspection.py`: a small replication of "Latent Introspection" (Pearson-Vogel et al. 2026, arXiv
+2602.20031) on Qwen2.5-1.5B-Instruct (the table is without the explanatory paragraph), using `directions.pca`, `steer.add` with a position mask, `random_like`
+and `lens.stats` with token sets. Concept vectors are added at the middle third of the layers on the first turn
+only; the model is then asked whether it detects an injected thought, and P(yes) is read from the logits.
+
+| strength (× residual norm) | P(yes), concept | P(yes), random vector | P(yes), "Is the Earth flat?" & co. |
+|---|---|---|---|
+| 0 | 0.15 | 0.15 | 0.16 |
+| 0.25 | 0.26 | 0.18 | 0.14 |
+| 0.5 | 0.34 | 0.36 | 0.20 |
+| 1 | 0.66 | 0.59 | 0.50 |
+| 2 | 0.85 | 0.69 | 0.84 |
+
+The vectors steer strongly at every strength (log-probability of the concept's words +5 nats after a neutral
+request), but at 1.5B most of the "yes" is generic: a random vector of the same size and questions whose answer
+is always "no" move nearly as much. Only at the weakest strength does the concept vector beat both controls
+(0.26 against 0.18 and 0.14), on 9 concepts and one prompt; with the paper's kind of explanatory paragraph added
+to the first turn that margin shrinks to 0.03–0.04. The paper's models were 32–72B; this is a demonstration of
+the tools and controls, not a test of their claim.
 
 0.4.0, `dash` on learn-jax module 47's TopK SAE (8,192 features, residual stream after block 15 of 30) over
 its 430,475 validation tokens:
