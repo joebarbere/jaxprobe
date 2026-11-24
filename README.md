@@ -4,8 +4,8 @@ Interpretability tools for JAX models: capture and patch activations, train spar
 browse features, and trace circuits. PyTorch has TransformerLens, nnsight, SAELens and circuit-tracer;
 JAX has had no maintained equivalent since Penzai was archived. jaxprobe aims to fill that gap.
 
-**Status: pre-alpha.** `core`, `sae`, `steer`, `trace`, `directions`, `io`, `probe`, `reduce` and `batch` work
-and are tested; `dash` is planned. The API may still change.
+**Status: pre-alpha.** `core`, `sae`, `steer`, `dash`, `trace`, `directions`, `io`, `probe`, `reduce` and `batch`
+work and are tested. The API may still change.
 
 ## Quick start
 
@@ -64,8 +64,12 @@ Both mistakes raise `TapError` rather than returning wrong or leaked values.
   loss recovered, density.
 - **steer**: mean-difference (CAA) and ActAdd vectors; `add` and `ablate` patches; `orthogonalize`, which bakes
   an ablation into the weights; `sweep` over layer × coefficient; KL for damage.
-- **dash** (planned): feature dashboards with top contexts, logit effects and density. Auto-interpretation
-  through any OpenAI-compatible local server, with static HTML and Neuronpedia-compatible JSON.
+- **dash**: feature dashboards for SAEs and transcoders. `Collector` streams codes over a dataset in one
+  compiled call per batch: firing density, a log-activation histogram, top contexts (one per sequence, with
+  the activations around the peak) and, optionally, how often every pair of features fires together.
+  `logit_effects`, `neighbours` (decoder cosine), `coactivation` (φ of firing) and `feature_map` (PCA, or UMAP
+  with the `umap` extra). `to_html` writes one self-contained page: a clickable map of the features and a card
+  per feature. `to_neuronpedia` writes SAEDashboard's Neuronpedia JSON layout. Auto-interpretation is planned.
 - **trace**: attribution graphs (Ameisen et al. 2025) with per-layer transcoders. `attribute` replaces each MLP
   by its transcoder plus an error term, freezes the tapped nonlinearities (attention patterns, norm scales), and
   gets every edge of the resulting linear model from one batched `jax.vjp`. `prune` keeps the nodes and edges
@@ -107,6 +111,18 @@ On SmolLM2-135M (float32, AMD RX 7600 XT, JAX 0.12.1 on ROCm), with taps added t
   - Removing a graph's 30 most influential features drops P(" Texas") after "Dallas is a city in the state of"
     from 0.94 to 0.23. Removing 30 random active features leaves it at 0.94.
   - The exported JSON opens in circuit-tracer's viewer.
+
+0.4.0, `dash` on learn-jax module 47's TopK SAE (8,192 features, residual stream after block 15 of 30) over
+its 430,475 validation tokens:
+
+- Collecting density, histograms and the top 16 contexts takes 20 s (38 s with co-activation counts); the
+  firing counts equal an independent count on the same codes, and the logit effects match module 47's own
+  dashboard exactly.
+- Features specific to one of the three text domains (detective fiction, astronomy abstracts, Shakespeare)
+  had their 10 nearest map neighbours in the same domain 88% of the time on a UMAP of co-activation, 77% on a
+  PCA of co-activation and 75% on a UMAP of decoder directions, against 66% by chance; a PCA of decoder
+  directions is one round blob (their median best cosine is only 0.26). UMAP takes about a minute.
+- The page for all 8,010 live features is 13 MB and opens without a network connection.
 
 0.3.0 on Qwen2.5-1.5B-Instruct (bf16 unless stated, same GPU, 12 harmful and 12 harmless prompts):
 
