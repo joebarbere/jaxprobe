@@ -4,7 +4,7 @@ Interpretability tools for JAX models: capture and patch activations, train spar
 browse features, and trace circuits. PyTorch has TransformerLens, nnsight, SAELens and circuit-tracer;
 JAX has had no maintained equivalent since Penzai was archived. jaxprobe aims to fill that gap.
 
-**Status: pre-alpha.** `core`, `sae`, `steer`, `dash`, `lens`, `monitor`, `trace`, `directions`, `io`, `probe`,
+**Status: pre-alpha.** `core`, `sae`, `steer`, `dash`, `autointerp`, `lens`, `monitor`, `trace`, `directions`, `io`, `probe`,
 `reduce` and `batch` work and are tested. The API may still change.
 
 ## Quick start
@@ -78,7 +78,13 @@ Both mistakes raise `TapError` rather than returning wrong or leaked values.
   the activations around the peak) and, optionally, how often every pair of features fires together.
   `logit_effects`, `neighbours` (decoder cosine), `coactivation` (φ of firing) and `feature_map` (PCA, or UMAP
   with the `umap` extra). `to_html` writes one self-contained page: a clickable map of the features and a card
-  per feature. `to_neuronpedia` writes SAEDashboard's Neuronpedia JSON layout. Auto-interpretation is planned.
+  per feature. `to_neuronpedia` writes SAEDashboard's Neuronpedia JSON layout.
+- **autointerp**: a chat model explains each feature from its top contexts, and the explanation is scored on
+  contexts it hasn't seen (Paulo et al. 2024): **detection** (does the feature fire anywhere in this excerpt?)
+  and **fuzzing** (are the marked tokens the ones it fires on?). Both are balanced yes/no tests, run beside a
+  control that gives every feature another feature's explanation. `Client` talks to any OpenAI-compatible
+  server (LM Studio, llama.cpp, vLLM, Ollama) using only the standard library, with a reply cache; any function
+  from prompts to replies works too. `random_windows` collects verified negatives while you run the `Collector`.
 - **monitor**: watch a model's internals while it trains or serves. `health` (per-token RMS and its maximum,
   largest |x|, outlier dimensions, NaN/Inf), `attention` (entropy per head, peak weight, attention-sink share),
   `units` (dead and active fractions) and `project` (scores along a direction or probe) are capture reducers, so
@@ -130,6 +136,26 @@ On SmolLM2-135M (float32, AMD RX 7600 XT, JAX 0.12.1 on ROCm), with taps added t
   - Removing a graph's 30 most influential features drops P(" Texas") after "Dallas is a city in the state of"
     from 0.94 to 0.23. Removing 30 random active features leaves it at 0.94.
   - The exported JSON opens in circuit-tracer's viewer.
+
+0.7.0, `autointerp` on module 47's TopK SAE (SmolLM2-135M, layer 15), with Qwen3.5-9B in LM Studio explaining
+and scoring 200 features (the 30 the lesson shows and 170 picked at random); mean accuracy over features:
+
+| | real explanations | control (another feature's explanation) |
+|---|---|---|
+| detection | 81.0% ± 1.2% | 49.3% ± 0.5% |
+| fuzzing | 67.7% ± 1.3% | 51.5% ± 0.7% |
+
+- Of the 171 features picked at random, 49% were detected at 14 of 16 or better and 8% at chance or worse.
+  Explanations that scored 100% on detection include "the second-person singular pronoun 'thou' or its
+  variants", "negative exponents in units like cm⁻² or s⁻¹" and "proper nouns representing months and
+  observatory names".
+- Six features fire on nearly every token, so they have no negatives and no tokens to mark wrongly. Both
+  tests skip them rather than score them on positives alone; the first version did, and its control fell to 45%.
+- About 2,600 requests in 37 minutes on the RX 7600 XT, one at a time. Two settings mattered: Qwen3.5 thinks
+  by default and hadn't answered after 4,000 tokens until `reasoning_effort: "none"`; and with four requests
+  in flight, LM Studio's build decoded each at about 1 token/s instead of 33.
+- Rebuilding module 47's dashboards on `dash.Collector` reproduced its statistics exactly and 236 of 240 shown
+  contexts (the collector keeps one context per sequence).
 
 0.6.0, `monitor` on SmolLM2-135M (bf16) and module 47's TopK SAE:
 
